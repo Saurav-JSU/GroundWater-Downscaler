@@ -1,0 +1,92 @@
+# Configuration for GRACE Groundwater Downscaling
+
+# Data Parameters
+data:
+  # Region of interest
+  region:
+    name: "Mississippi"
+    source: "TIGER/2018/States"
+  
+  # Date range
+  date_range:
+    start_date: "2002-04-01"
+    end_date: "2023-01-01"
+  
+  # GRACE data
+  grace:
+    collection: "JPL"  # Options: JPL (Mascon), LAND (multiple solutions)
+    band: "lwe_thickness"  # For Mascon dataset, just "lwe_thickness" 
+    scale: 25000  # Scale in meters
+  
+  # Auxiliary data
+  auxiliary:
+    soil_moisture:
+      collection: "smap"
+      band: "sm_surface"  # Updated band name for SMAP SPL4SMGP
+      scale: 10000
+    precipitation:
+      collection: "chirps"
+      band: "precipitation"
+      scale: 5000
+    evapotranspiration:
+      collection: "modis"
+      band: "ET"  # Band name should still be the same for MOD16A2
+      scale: 1000
+  
+  # USGS groundwater data
+  groundwater:
+    state_code: "MS"
+    parameter_code: "72019"  # Depth to water level, feet below land surface
+  
+  # Output resolution
+  target_resolution: 0.01  # Degrees
+
+# Preprocessing Parameters
+preprocessing:
+  # Normalization
+  normalization:
+    method: "standard"  # Options: standard, minmax
+  
+  # Patch creation
+  patches:
+    size: 64
+    stride: 32
+  
+  # Data splitting
+  split:
+    test_ratio: 0.2
+    validation_ratio: 0.1
+    random_seed: 42
+
+# Model Parameters
+model:
+  # Model type
+  type: "unet"  # Options: unet, super_resolution
+  
+  # U-Net parameters
+  unet:
+    n_filters: 64
+    dropout: 0.2
+  
+  # Super-resolution parameters
+  super_resolution:
+    n_filters: 64
+    n_blocks: 8
+    scale_factor: 4
+  
+  # Training parameters
+  training:
+    batch_size: 16
+    epochs: 100
+    patience: 20
+    learning_rate: 0.0001
+    loss: "mse"  # Options: mse, mae, huber
+
+# Path Parameters
+paths:
+  data_dir: "data"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  output_dir: "data/output"
+  model_dir: "models"
+  figures_dir: "figures"
