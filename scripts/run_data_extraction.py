@@ -7,7 +7,7 @@ and time period. It uses Google Earth Engine for GRACE and auxiliary data, and t
 REST API for groundwater data.
 
 Usage:
-    python run_data_extraction.py --region mississippi --start_date 2002-04-01 --end_date 2023-01-01
+    python run_data_extraction.py --region mississippi --start_date 2003-01-01 --end_date 2023-01-01
 """
 import os
 import sys
@@ -39,18 +39,14 @@ from src.data.grace import get_grace_collection, filter_grace_collection, extrac
 from src.data.usgs import get_usgs_groundwater_data, convert_to_geodataframe, get_monthly_aggregation
 from src.data.auxiliary import (
     get_soil_moisture_collection, get_precipitation_collection, get_evapotranspiration_collection,
-    get_surface_water_collection, filter_collection, extract_time_series, export_monthly_composites,
-    get_static_features, export_static_features
+    get_groundwater_collection, get_tws_collection, get_baseflow_collection, get_rootzone_collection,
+    get_profile_moisture_collection, get_surface_water_collection,
+    filter_collection, extract_time_series, export_monthly_composites,
+    get_static_features, export_static_features, export_to_drive
 )
 
 def setup_logging(log_file=None):
-    """Set up logging configuration.
-    
-    Parameters
-    ----------
-    log_file : str, optional
-        Log file path, by default None
-    """
+    """Set up logging configuration."""
     # Create logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
@@ -72,31 +68,14 @@ def setup_logging(log_file=None):
         logger.addHandler(file_handler)
 
 def load_config(config_path):
-    """Load configuration from YAML file.
-    
-    Parameters
-    ----------
-    config_path : str
-        Path to configuration file
-        
-    Returns
-    -------
-    dict
-        Configuration dictionary
-    """
+    """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
     return config
 
 def parse_args():
-    """Parse command line arguments.
-    
-    Returns
-    -------
-    argparse.Namespace
-        Command line arguments
-    """
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Extract data for GRACE downscaling')
     
     parser.add_argument('--config', type=str, default='config/config.yaml',
@@ -111,6 +90,8 @@ def parse_args():
                         help='Output directory')
     parser.add_argument('--log_file', type=str,
                         help='Log file path')
+    parser.add_argument('--skip_grace', action='store_true',
+                        help='Skip GRACE data extraction (use if GRACE data is already downloaded)')
     
     return parser.parse_args()
 
@@ -152,8 +133,19 @@ def main():
     auxiliary_dir = raw_dir / 'auxiliary'
     groundwater_dir = raw_dir / 'groundwater'
     
-    for directory in [grace_dir, auxiliary_dir, groundwater_dir]:
+    # Create subdirectories for different auxiliary data types
+    auxiliary_subdirs = [
+        'soil_moisture', 'precipitation', 'evapotranspiration', 
+        'groundwater', 'tws', 'baseflow', 'rootzone',
+        'profile_moisture', 'static'
+    ]
+    
+    # Create all directories
+    for directory in [grace_dir, groundwater_dir]:
         directory.mkdir(parents=True, exist_ok=True)
+    
+    for subdir in auxiliary_subdirs:
+        (auxiliary_dir / subdir).mkdir(parents=True, exist_ok=True)
     
     # Initialize Earth Engine
     logging.info("Initializing Earth Engine...")
@@ -176,101 +168,157 @@ def main():
     # m = display_region(region, region_name)
     # m.to_notebook()
     
-    # Extract GRACE data
-    logging.info("Extracting GRACE data...")
-    grace = get_grace_collection(grace_collection)
-    grace_filtered = filter_grace_collection(grace, start_date, end_date, grace_band)
-    
-    # Extract GRACE time series
-    logging.info("Extracting GRACE time series...")
-    grace_ts = extract_grace_time_series(grace_filtered, region, grace_scale)
-    
-    # Export GRACE time series
-    grace_ts.to_csv(str(grace_dir / 'grace_time_series.csv'), index=False)
-    
-    # Export GRACE images
-    logging.info("Exporting GRACE images...")
-    output_folder = f"GRACE_{region_name}"
-    grace_tasks = export_grace_images(grace_filtered, region, output_folder, 'GRACE', grace_scale)
+    # Check if GRACE extraction should be skipped
+    if args.skip_grace:
+        logging.info("Skipping GRACE data extraction as requested (--skip_grace flag is set)...")
+    else:
+        # Extract GRACE data
+        logging.info("Extracting GRACE data...")
+        grace = get_grace_collection(grace_collection)
+        grace_filtered = filter_grace_collection(grace, start_date, end_date, grace_band)
+        
+        # Extract GRACE time series
+        logging.info("Extracting GRACE time series...")
+        grace_ts = extract_grace_time_series(grace_filtered, region, grace_scale)
+        
+        # Export GRACE time series
+        grace_ts.to_csv(str(grace_dir / 'grace_time_series.csv'), index=False)
+        
+        # Export GRACE images
+        logging.info("Exporting GRACE images...")
+        output_folder = f"GRACE_{region_name}"
+        grace_tasks = export_grace_images(grace_filtered, region, output_folder, 'GRACE', grace_scale)
     
     # Extract auxiliary data
     logging.info("Extracting auxiliary data...")
     
-    # Extract soil moisture
-    logging.info("Extracting soil moisture data...")
-    sm_collection = get_soil_moisture_collection(config['data']['auxiliary']['soil_moisture']['collection'])
-    sm_band = config['data']['auxiliary']['soil_moisture']['band']
-    sm_scale = config['data']['auxiliary']['soil_moisture']['scale']
+    # 1. Extract soil moisture data
+    if 'soil_moisture' in config['data']['auxiliary']:
+        logging.info("Exporting soil moisture data to Google Drive...")
+        sm_source = config['data']['auxiliary']['soil_moisture']['collection']
+        sm_band = config['data']['auxiliary']['soil_moisture']['band']
+        sm_scale = config['data']['auxiliary']['soil_moisture']['scale']
+        
+        sm_collection = get_soil_moisture_collection(sm_source)
+        output_folder = f"SM_{region_name}"
+        
+        sm_tasks = export_to_drive(
+            sm_collection, region, sm_band, output_folder, 'SM',
+            start_date, end_date, sm_scale, time_step='month'
+        )
+        logging.info(f"Started {len(sm_tasks)} export tasks for soil moisture data")
     
-    # Increase scale (lower resolution) for memory-intensive datasets
-    sm_scale_adjusted = sm_scale * 2  # Double the scale to reduce memory usage
+    # 2. Extract precipitation data
+    if 'precipitation' in config['data']['auxiliary']:
+        logging.info("Exporting precipitation data to Google Drive...")
+        precip_source = config['data']['auxiliary']['precipitation']['collection']
+        precip_band = config['data']['auxiliary']['precipitation']['band']
+        precip_scale = config['data']['auxiliary']['precipitation']['scale']
+        
+        precip_collection = get_precipitation_collection(precip_source)
+        output_folder = f"PRECIP_{region_name}"
+        
+        precip_tasks = export_to_drive(
+            precip_collection, region, precip_band, output_folder, 'PRECIP',
+            start_date, end_date, precip_scale, time_step='month'
+        )
+        logging.info(f"Started {len(precip_tasks)} export tasks for precipitation data")
+
+    # 3. Extract evapotranspiration data
+    if 'evapotranspiration' in config['data']['auxiliary']:
+        logging.info("Exporting evapotranspiration data to Google Drive...")
+        et_source = config['data']['auxiliary']['evapotranspiration']['collection']
+        et_band = config['data']['auxiliary']['evapotranspiration']['band']
+        et_scale = config['data']['auxiliary']['evapotranspiration']['scale']
+        
+        et_collection = get_evapotranspiration_collection(et_source)
+        output_folder = f"ET_{region_name}"
+        
+        et_tasks = export_to_drive(
+            et_collection, region, et_band, output_folder, 'ET',
+            start_date, end_date, et_scale, time_step='month'
+        )
+        logging.info(f"Started {len(et_tasks)} export tasks for evapotranspiration data")
     
-    sm_filtered = filter_collection(sm_collection, start_date, end_date, sm_band)
-    # Process in smaller chunks to avoid memory limits
-    sm_ts = extract_time_series(sm_filtered, region, sm_scale_adjusted, chunk_size=3)
-    
-    # Export soil moisture time series if we have data
-    if sm_ts is not None:
-        sm_ts.to_csv(str(auxiliary_dir / 'soil_moisture_time_series.csv'), index=False)
-    else:
-        logging.warning("No soil moisture time series data extracted")
-    
-    # Export soil moisture images with adjusted scale
-    logging.info("Exporting soil moisture images...")
-    output_folder = f"SM_{region_name}"
-    sm_tasks = export_monthly_composites(
-        sm_collection, start_date, end_date, region, sm_band,
-        output_folder, 'SM', sm_scale_adjusted
-    )
-    
-    # Extract precipitation
-    logging.info("Extracting precipitation data...")
-    precip_collection = get_precipitation_collection(config['data']['auxiliary']['precipitation']['collection'])
-    precip_band = config['data']['auxiliary']['precipitation']['band']
-    precip_scale = config['data']['auxiliary']['precipitation']['scale']
-    
-    precip_filtered = filter_collection(precip_collection, start_date, end_date, precip_band)
-    precip_ts = extract_time_series(precip_filtered, region, precip_scale, chunk_size=6)
-    
-    # Export precipitation time series if we have data
-    if precip_ts is not None:
-        precip_ts.to_csv(str(auxiliary_dir / 'precipitation_time_series.csv'), index=False)
-    else:
-        logging.warning("No precipitation time series data extracted")
-    
-    # Export precipitation images
-    logging.info("Exporting precipitation images...")
-    output_folder = f"PRECIP_{region_name}"
-    precip_tasks = export_monthly_composites(
-        precip_collection, start_date, end_date, region, precip_band,
-        output_folder, 'PRECIP', precip_scale
-    )
-    
-    # Extract evapotranspiration
-    logging.info("Extracting evapotranspiration data...")
-    et_collection = get_evapotranspiration_collection(config['data']['auxiliary']['evapotranspiration']['collection'])
-    et_band = config['data']['auxiliary']['evapotranspiration']['band']
-    et_scale = config['data']['auxiliary']['evapotranspiration']['scale']
-    
-    # Increase scale for memory-intensive datasets
-    et_scale_adjusted = et_scale * 2  # Double the scale to reduce memory usage
-    
-    et_filtered = filter_collection(et_collection, start_date, end_date, et_band)
-    et_ts = extract_time_series(et_filtered, region, et_scale_adjusted, chunk_size=3)
-    
-    # Export evapotranspiration time series if we have data
-    if et_ts is not None:
-        et_ts.to_csv(str(auxiliary_dir / 'evapotranspiration_time_series.csv'), index=False)
-    else:
-        logging.warning("No evapotranspiration time series data extracted")
-    
-    # Export evapotranspiration images
-    logging.info("Exporting evapotranspiration images...")
-    output_folder = f"ET_{region_name}"
-    et_tasks = export_monthly_composites(
-        et_collection, start_date, end_date, region, et_band,
-        output_folder, 'ET', et_scale_adjusted
-    )
+    # 4. Extract groundwater data from GLDAS
+    if 'groundwater' in config['data']['auxiliary']:
+        logging.info("Exporting GLDAS groundwater data to Google Drive...")
+        gw_source = config['data']['auxiliary']['groundwater']['collection']
+        gw_band = config['data']['auxiliary']['groundwater']['band']
+        gw_scale = config['data']['auxiliary']['groundwater']['scale']
+        
+        gw_collection = get_groundwater_collection(gw_source)
+        output_folder = f"GW_{region_name}"
+        
+        gw_tasks = export_to_drive(
+            gw_collection, region, gw_band, output_folder, 'GW',
+            start_date, end_date, gw_scale, time_step='month'
+        )
+        logging.info(f"Started {len(gw_tasks)} export tasks for groundwater data")
+
+    # 5. Extract TWS data from GLDAS
+    if 'tws' in config['data']['auxiliary']:
+        logging.info("Exporting TWS data to Google Drive...")
+        tws_source = config['data']['auxiliary']['tws']['collection']
+        tws_band = config['data']['auxiliary']['tws']['band']
+        tws_scale = config['data']['auxiliary']['tws']['scale']
+        
+        tws_collection = get_tws_collection(tws_source)
+        output_folder = f"TWS_{region_name}"
+        
+        tws_tasks = export_to_drive(
+            tws_collection, region, tws_band, output_folder, 'TWS',
+            start_date, end_date, tws_scale, time_step='month'
+        )
+        logging.info(f"Started {len(tws_tasks)} export tasks for TWS data")
+
+    # 6. Extract baseflow data from GLDAS
+    if 'baseflow' in config['data']['auxiliary']:
+        logging.info("Exporting baseflow data to Google Drive...")
+        bf_source = config['data']['auxiliary']['baseflow']['collection']
+        bf_band = config['data']['auxiliary']['baseflow']['band']
+        bf_scale = config['data']['auxiliary']['baseflow']['scale']
+        
+        bf_collection = get_baseflow_collection(bf_source)
+        output_folder = f"BF_{region_name}"
+        
+        bf_tasks = export_to_drive(
+            bf_collection, region, bf_band, output_folder, 'BF',
+            start_date, end_date, bf_scale, time_step='month'
+        )
+        logging.info(f"Started {len(bf_tasks)} export tasks for baseflow data")
+
+    # 7. Extract root zone soil moisture data from GLDAS
+    if 'rootzone' in config['data']['auxiliary']:
+        logging.info("Exporting root zone soil moisture data to Google Drive...")
+        rz_source = config['data']['auxiliary']['rootzone']['collection']
+        rz_band = config['data']['auxiliary']['rootzone']['band']
+        rz_scale = config['data']['auxiliary']['rootzone']['scale']
+        
+        rz_collection = get_rootzone_collection(rz_source)
+        output_folder = f"RZ_{region_name}"
+        
+        rz_tasks = export_to_drive(
+            rz_collection, region, rz_band, output_folder, 'RZ',
+            start_date, end_date, rz_scale, time_step='month'
+        )
+        logging.info(f"Started {len(rz_tasks)} export tasks for root zone soil moisture data")
+
+    # 8. Extract profile soil moisture data from GLDAS
+    if 'profile_moisture' in config['data']['auxiliary']:
+        logging.info("Exporting profile soil moisture data to Google Drive...")
+        pm_source = config['data']['auxiliary']['profile_moisture']['collection']
+        pm_band = config['data']['auxiliary']['profile_moisture']['band']
+        pm_scale = config['data']['auxiliary']['profile_moisture']['scale']
+        
+        pm_collection = get_profile_moisture_collection(pm_source)
+        output_folder = f"PM_{region_name}"
+        
+        pm_tasks = export_to_drive(
+            pm_collection, region, pm_band, output_folder, 'PM',
+            start_date, end_date, pm_scale, time_step='month'
+        )
+        logging.info(f"Started {len(pm_tasks)} export tasks for profile soil moisture data")
     
     # Extract static features
     logging.info("Extracting static features...")

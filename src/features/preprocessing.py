@@ -84,8 +84,8 @@ def reproject_raster(data, src_transform, src_crs,
     return dst_data, dst_transform
 
 def create_dataset_from_files(grace_files, auxiliary_files, static_files,
-                             grace_dir, auxiliary_dir, static_dir,
-                             target_resolution=0.01):
+                            grace_dir, auxiliary_dir, static_dir,
+                            target_resolution=0.01):
     """Create dataset from GRACE and auxiliary files.
     
     Parameters
@@ -139,41 +139,80 @@ def create_dataset_from_files(grace_files, auxiliary_files, static_files,
     # Process all GRACE files
     logger.info("Processing GRACE files...")
     for file_name in tqdm(grace_files):
-        # Extract date from filename
-        date_str = file_name.split('_')[1:3]  # Assume format 'GRACE_YYYY_MM.tif'
-        year = int(date_str[0])
-        month = int(date_str[1])
-        date = datetime(year, month, 1)
-        dates.append(date)
-        
-        # Load GRACE data
-        grace_path = os.path.join(grace_dir, file_name)
-        data, transform, crs, _ = load_raster(grace_path)
-        
-        # Check if data was loaded
-        if data is None:
-            logger.warning(f"Skipping {file_name} due to loading error")
-            continue
-        
-        # Reproject if needed
-        if crs != dst_crs or transform != dst_transform:
-            data, _ = reproject_raster(
-                data, transform, crs,
-                dst_crs, dst_shape, dst_transform
-            )
-        
-        grace_data.append(data)
+        try:
+            # Extract date from filename
+            # Handle format 'GRACE_YYYY_MM.tif'
+            parts = file_name.replace('.tif', '').split('_')
+            if len(parts) >= 3:
+                year = int(parts[1])
+                month = int(parts[2])
+            else:
+                # Try to extract from the second part assuming GRACE_YYYYMM.tif
+                date_part = parts[1]
+                if len(date_part) >= 6:  # Long enough for YYYYMM
+                    year = int(date_part[:4])
+                    month = int(date_part[4:6])
+                else:
+                    raise ValueError(f"Unexpected date format in {file_name}")
+            
+            date = datetime(year, month, 1)
+            dates.append(date)
+            
+            # Log successful parsing
+            logger.debug(f"Parsed date {date} from {file_name}")
+            
+            # Load GRACE data
+            grace_path = os.path.join(grace_dir, file_name)
+            data, transform, crs, _ = load_raster(grace_path)
+            
+            # Check if data was loaded
+            if data is None:
+                logger.warning(f"Skipping {file_name} due to loading error")
+                continue
+            
+            # Reproject if needed
+            if crs != dst_crs or transform != dst_transform:
+                data, _ = reproject_raster(
+                    data, transform, crs,
+                    dst_crs, dst_shape, dst_transform
+                )
+            
+            grace_data.append(data)
+        except (ValueError, IndexError) as e:
+            logger.warning(f"Error parsing date from {file_name}: {e}. Skipping this file.")
+            continue  # Skip this file
     
     # Process auxiliary files
     auxiliary_datasets = {}
     
+    # Define auxiliary category paths
+    aux_category_paths = {
+        'soil_moisture': os.path.join(auxiliary_dir, 'soil_moisture'),
+        'precipitation': os.path.join(auxiliary_dir, 'precipitation'),
+        'evapotranspiration': os.path.join(auxiliary_dir, 'evapotranspiration'),
+        'groundwater': os.path.join(auxiliary_dir, 'groundwater'),
+        'tws': os.path.join(auxiliary_dir, 'tws'),
+        'baseflow': os.path.join(auxiliary_dir, 'baseflow'),
+        'rootzone': os.path.join(auxiliary_dir, 'rootzone'),
+        'profile_moisture': os.path.join(auxiliary_dir, 'profile_moisture')
+    }
+    
+    # Create auxiliary directories if they don't exist
+    for path in aux_category_paths.values():
+        os.makedirs(path, exist_ok=True)
+    
     for var_name, file_list in auxiliary_files.items():
+        if var_name in aux_category_paths:
+            category_path = aux_category_paths[var_name]
+        else:
+            category_path = auxiliary_dir  # Default to main auxiliary directory
+            
         logger.info(f"Processing {var_name} files...")
         var_data = []
         
         for file_name in tqdm(file_list):
             # Load auxiliary data
-            aux_path = os.path.join(auxiliary_dir, file_name)
+            aux_path = os.path.join(category_path, file_name)
             data, transform, crs, _ = load_raster(aux_path)
             
             # Check if data was loaded
@@ -243,6 +282,12 @@ def create_dataset_from_files(grace_files, auxiliary_files, static_files,
     
     # Stack all time steps
     X = np.stack(X, axis=0)
+    
+    # Log feature information
+    n_features = X.shape[-1]
+    feature_names = ['GRACE'] + list(auxiliary_datasets.keys()) + list(static_datasets.keys())
+    logger.info(f"Created dataset with {n_features} features: {', '.join(feature_names)}")
+    logger.info(f"Dataset shape: {X.shape} (time steps, height, width, features)")
     
     return X, dates, lats, lons
 

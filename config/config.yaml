@@ -9,29 +9,49 @@ data:
   
   # Date range
   date_range:
-    start_date: "2002-04-01"
+    start_date: "2003-01-01"  # GLDAS-2.2 CLSM starts in 2003
     end_date: "2023-01-01"
   
   # GRACE data
   grace:
     collection: "JPL"  # Options: JPL (Mascon), LAND (multiple solutions)
-    band: "lwe_thickness"  # For Mascon dataset, just "lwe_thickness" 
+    band: "lwe_thickness"  # For Mascon dataset
     scale: 25000  # Scale in meters
   
   # Auxiliary data
   auxiliary:
     soil_moisture:
-      collection: "smap"
-      band: "sm_surface"  # Updated band name for SMAP SPL4SMGP
-      scale: 10000
+      collection: "gldas"  # Using GLDAS-2.2 CLSM
+      band: "SoilMoist_S_tavg"  # Surface soil moisture
+      scale: 25000  # 0.25-degree resolution
     precipitation:
-      collection: "chirps"
-      band: "precipitation"
-      scale: 5000
+      collection: "chirps"  # Using CHIRPS for direct precipitation
+      band: "precipitation"  # Precipitation
+      scale: 5000  # 5km resolution
     evapotranspiration:
-      collection: "modis"
-      band: "ET"  # Band name should still be the same for MOD16A2
-      scale: 1000
+      collection: "gldas"  # Using GLDAS-2.2 CLSM
+      band: "Evap_tavg"  # Evapotranspiration rate
+      scale: 25000
+    groundwater:
+      collection: "gldas"  # Using GLDAS-2.2 CLSM
+      band: "GWS_tavg"  # Groundwater storage
+      scale: 25000
+    tws:
+      collection: "gldas"  # Using GLDAS-2.2 CLSM
+      band: "TWS_tavg"  # Terrestrial water storage
+      scale: 25000
+    baseflow:
+      collection: "gldas"  # Using GLDAS-2.2 CLSM
+      band: "Qsb_tavg"  # Baseflow-groundwater runoff
+      scale: 25000
+    rootzone:
+      collection: "gldas"  # Using GLDAS-2.2 CLSM
+      band: "SoilMoist_RZ_tavg"  # Root zone soil moisture
+      scale: 25000
+    profile_moisture:
+      collection: "gldas"  # Using GLDAS-2.2 CLSM
+      band: "SoilMoist_P_tavg"  # Profile soil moisture
+      scale: 25000
   
   # USGS groundwater data
   groundwater:
@@ -67,6 +87,7 @@ model:
   unet:
     n_filters: 64
     dropout: 0.2
+    n_blocks: 8
   
   # Super-resolution parameters
   super_resolution:

@@ -78,7 +78,20 @@ def parse_args():
     return parser.parse_args()
 
 def get_file_lists(input_dir):
-    """Get lists of files in the input directory."""
+    """Get lists of files in the input directory.
+    
+    Parameters
+    ----------
+    input_dir : str
+        Input directory with raw data
+        
+    Returns
+    -------
+    tuple
+        (grace_files, auxiliary_files, static_files, grace_dir, auxiliary_dir, static_dir)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
     # Initialize file lists
     grace_files = []
     auxiliary_files = {}
@@ -88,31 +101,65 @@ def get_file_lists(input_dir):
     input_dir = Path(input_dir)
     grace_dir = input_dir / 'grace'
     auxiliary_dir = input_dir / 'auxiliary'
-    static_dir = input_dir / 'auxiliary'  # Static files are in the auxiliary directory
+    static_dir = input_dir / 'auxiliary' / 'static'
     
     # Get GRACE files
-    grace_files = sorted([f.name for f in grace_dir.glob('GRACE_*.tif')])
+    if grace_dir.exists():
+        grace_files = sorted([f.name for f in grace_dir.glob('GRACE_*.tif')])
     
-    # Get auxiliary files
-    aux_categories = ['SM', 'PRECIP', 'ET']
+    # Define auxiliary categories
+    aux_categories = [
+        'soil_moisture', 'precipitation', 'evapotranspiration',
+        'groundwater', 'tws', 'baseflow', 'rootzone', 'profile_moisture'
+    ]
     
-    for category in aux_categories:
-        pattern = f"{category}_*.tif"
-        files = sorted([f.name for f in auxiliary_dir.glob(pattern)])
-        auxiliary_files[category.lower()] = files
-    
-    # Get static files
-    static_patterns = {
-        'elevation': 'static_elevation.tif',
-        'slope': 'static_slope.tif',
-        'aspect': 'static_aspect.tif',
-        'water_occurrence': 'static_water_occurrence.tif'
+    # Define file prefixes for each category
+    aux_prefixes = {
+        'soil_moisture': 'SM_',
+        'precipitation': 'PRECIP_',
+        'evapotranspiration': 'ET_',
+        'groundwater': 'GW_',
+        'tws': 'TWS_',
+        'baseflow': 'BF_',
+        'rootzone': 'RZ_',
+        'profile_moisture': 'PM_'
     }
     
-    for name, pattern in static_patterns.items():
-        files = list(static_dir.glob(pattern))
-        if files:
-            static_files[name] = files[0].name
+    # Get auxiliary files for each category
+    for category in aux_categories:
+        category_dir = auxiliary_dir / category
+        
+        if category_dir.exists():
+            prefix = aux_prefixes.get(category, f"{category.upper()}_")
+            pattern = f"{prefix}*.tif"
+            files = sorted([f.name for f in category_dir.glob(pattern)])
+            
+            if files:
+                auxiliary_files[category] = files
+                logger.info(f"Found {len(files)} {category} files")
+            else:
+                logger.warning(f"No {category} files found with pattern {pattern} in {category_dir}")
+        else:
+            logger.warning(f"Directory {category_dir} does not exist")
+    
+    # Get static files
+    if static_dir.exists():
+        static_patterns = {
+            'elevation': 'static_elevation.tif',
+            'slope': 'static_slope.tif',
+            'aspect': 'static_aspect.tif',
+            'water_occurrence': 'static_water_occurrence.tif'
+        }
+        
+        for name, pattern in static_patterns.items():
+            files = list(static_dir.glob(pattern))
+            if files:
+                static_files[name] = files[0].name
+                logger.info(f"Found static {name} file: {files[0].name}")
+            else:
+                logger.warning(f"No static {name} file found with pattern {pattern}")
+    else:
+        logger.warning(f"Static directory {static_dir} does not exist")
     
     return grace_files, auxiliary_files, static_files, grace_dir, auxiliary_dir, static_dir
 
@@ -135,6 +182,9 @@ def load_groundwater_data(input_dir):
         logging.warning(f"Groundwater data file not found: {gw_file}")
         return None
 
+# In scripts/run_preprocessing.py
+# Find the create_groundwater_targets function and modify it:
+
 def create_groundwater_targets(gw_data, grace_dates, lats, lons):
     """Create groundwater target grids for each GRACE date."""
     if gw_data is None:
@@ -154,12 +204,95 @@ def create_groundwater_targets(gw_data, grace_dates, lats, lons):
     
     # Create grids for each date
     logging.info("Creating groundwater grids...")
+    
+    # Get target resolution from config
+    try:
+        import yaml
+        with open('config/config.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+        target_resolution = config['data']['target_resolution']
+        logging.info(f"Using target resolution from config: {target_resolution}")
+    except:
+        target_resolution = 0.01  # Default value
+        logging.warning(f"Could not load resolution from config, using default: {target_resolution}")
+    
+    # Create empty grid with correct dimensions as a template
+    from src.data.usgs import create_empty_grid
+    template_grid = create_empty_grid(
+        min_lon=min(lons), 
+        max_lon=max(lons), 
+        min_lat=min(lats), 
+        max_lat=max(lats), 
+        resolution=target_resolution
+    )
+    
+    if template_grid is None:
+        logging.error("Failed to create template grid. Using GRACE data as proxy targets.")
+        return None
+    
+    # Log grid dimensions
+    logging.info(f"Template grid shape: {template_grid.shape}, Expected shape in targets: {len(lats)}x{len(lons)}")
+    
+    if template_grid.shape != (len(lats), len(lons)):
+        logging.warning(f"Grid shape mismatch. Will attempt to resample groundwater grids.")
+    
     for i, date in enumerate(tqdm(grace_dates)):
-        grid = get_groundwater_grid(gw_gdf, date, resolution=0.01)
+        try:
+            # Create grid for this date with same dimensions as template
+            grid = get_groundwater_grid(
+                gw_gdf, date, 
+                resolution=target_resolution,
+                template_grid=template_grid
+            )
+            
+            if grid is not None:
+                if grid.shape == (len(lats), len(lons)):
+                    targets[i] = grid.values
+                else:
+                    # If shapes still don't match, use resampling
+                    import xarray as xr
+                    from scipy.interpolate import griddata
+                    
+                    # Get grid coordinates
+                    grid_lats = grid.coords['latitude'].values
+                    grid_lons = grid.coords['longitude'].values
+                    
+                    # Create meshgrid for original points
+                    grid_lon, grid_lat = np.meshgrid(grid_lons, grid_lats)
+                    
+                    # Create meshgrid for target points
+                    target_lon, target_lat = np.meshgrid(lons, lats)
+                    
+                    # Interpolate
+                    valid_data = ~np.isnan(grid.values)
+                    if np.any(valid_data):
+                        points = np.column_stack((grid_lat[valid_data].ravel(), grid_lon[valid_data].ravel()))
+                        values = grid.values[valid_data].ravel()
+                        
+                        # Use griddata to interpolate to new grid
+                        interpolated = griddata(
+                            points, values, 
+                            (target_lat, target_lon), 
+                            method='linear', 
+                            fill_value=np.nan
+                        )
+                        
+                        targets[i] = interpolated
+                        logging.info(f"Successfully resampled grid for date {date}")
+                    else:
+                        logging.warning(f"No valid data for date {date}")
+            else:
+                logging.warning(f"Could not create groundwater grid for date {date}")
         
-        if grid is not None:
-            # Convert xarray to numpy and add to targets
-            targets[i] = grid.values
+        except Exception as e:
+            logging.error(f"Error creating groundwater grid for date {date}: {e}")
+    
+    # Check for NaN values
+    nan_count = np.isnan(targets).sum()
+    if nan_count > 0:
+        logging.warning(f"Target array contains {nan_count} NaN values out of {targets.size}")
+        # Fill NaNs with 0
+        targets = np.nan_to_num(targets, nan=0.0)
     
     return targets
 
